@@ -11,7 +11,7 @@ import { Badge, Button, Card, CardBody, CardHeader, Drawer, Input, Label, Modal,
 import { apiDelete, apiGet, apiPatch, apiPost } from "@/lib/client";
 import { cn } from "@/lib/utils";
 import type { Agent, Event, Project, Task } from "@/lib/schemas";
-import { Handle, MiniMap, Position, ReactFlow, Background, Controls, type Edge, type Node, type NodeProps, useEdgesState, useNodesState } from "@xyflow/react";
+import { Handle, MiniMap, Position, ReactFlow, Background, Controls, type Connection, type Edge, type Node, type NodeProps, useEdgesState, useNodesState } from "@xyflow/react";
 import dagre from "dagre";
 import { Copy, Download, Moon, Plus, SunMedium, Trash2 } from "lucide-react";
 
@@ -149,6 +149,13 @@ export default function AgentsPage() {
   const [importing, setImporting] = useState(false);
   const [importError, setImportError] = useState<string | null>(null);
   const [importSummary, setImportSummary] = useState<ImportSummary | null>(null);
+  const [reparentError, setReparentError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!reparentError) return;
+    const id = setTimeout(() => setReparentError(null), 5000);
+    return () => clearTimeout(id);
+  }, [reparentError]);
 
   const load = async () => {
     const nextAgents = await apiGet<Agent[]>("/api/agents/flat");
@@ -266,8 +273,18 @@ export default function AgentsPage() {
   }
 
   async function moveAgent(agentId: number, parentId: number | null) {
-    await apiPost(`/api/agents/${agentId}/move`, { new_parent_id: parentId });
-    await load();
+    try {
+      await apiPost(`/api/agents/${agentId}/move`, { new_parent_id: parentId });
+      setReparentError(null);
+      await load();
+    } catch (err) {
+      setReparentError(err instanceof Error ? err.message : "Failed to move agent");
+    }
+  }
+
+  async function detachAgent() {
+    if (!selectedAgent || selectedAgent.parent_id === null) return;
+    await moveAgent(selectedAgent.id, null);
   }
 
   async function importFromOpenclaw() {
@@ -352,7 +369,11 @@ export default function AgentsPage() {
         <CardHeader className="flex items-center justify-between">
           <div>
             <div className="text-sm font-medium text-zinc-100">React Flow tree</div>
-            <div className="text-xs text-zinc-500">Drag a node near another node to reparent it.</div>
+            <div className="text-xs text-zinc-500">
+              Drag an agent onto another to make it report to that agent — or draw a line from a parent&apos;s bottom
+              handle to a child&apos;s top handle.
+            </div>
+            {reparentError ? <div className="mt-1 text-xs text-rose-400">{reparentError}</div> : null}
           </div>
           <div className="text-xs text-zinc-500">{agents.length} agent(s)</div>
         </CardHeader>
@@ -369,13 +390,49 @@ export default function AgentsPage() {
                 setSelectedAgent(agent);
               }
             }}
+            onConnect={(connection: Connection) => {
+              if (!connection.source || !connection.target) {
+                return;
+              }
+
+              const parentId = Number(connection.source);
+              const childId = Number(connection.target);
+              const child = agents.find((agent) => agent.id === childId);
+              const parent = agents.find((agent) => agent.id === parentId);
+
+              if (!child || !parent) {
+                return;
+              }
+
+              if (parentId === childId) {
+                setReparentError("An agent cannot report to itself.");
+                return;
+              }
+
+              if (child.parent_id === parentId) {
+                return;
+              }
+
+              if (wouldCreateCycleClient(agents, childId, parentId)) {
+                setReparentError(`Cannot connect — ${parent.name} is already a descendant of ${child.name}.`);
+                return;
+              }
+
+              void moveAgent(childId, parentId);
+            }}
             onNodeDragStop={(_, node) => {
               const target = nearestNode(nodeState, node.id, node.position.x, node.position.y);
               if (target && target.id !== node.id) {
                 const movingId = Number(node.id);
                 const newParentId = Number(target.id);
                 const moving = agents.find((agent) => agent.id === movingId);
-                if (!moving || moving.id === newParentId || moving.parent_id === newParentId) {
+                const newParent = agents.find((agent) => agent.id === newParentId);
+                if (!moving || !newParent || moving.id === newParentId || moving.parent_id === newParentId) {
+                  return;
+                }
+
+                if (wouldCreateCycleClient(agents, movingId, newParentId)) {
+                  setReparentError(`Cannot move ${moving.name} onto ${newParent.name} — ${newParent.name} is already a descendant of ${moving.name}.`);
                   return;
                 }
 
@@ -405,7 +462,18 @@ export default function AgentsPage() {
         open={Boolean(selectedAgent)}
         title={selectedAgent ? `${selectedAgent.name} · ${selectedAgent.role}` : "Agent"}
         onClose={() => setSelectedAgent(null)}
-        footer={selectedAgent ? <div className="flex gap-2"><Button variant="outline" onClick={() => void wake()}><SunMedium className="h-4 w-4" /> Wake</Button><Button variant="outline" onClick={() => void sleep()}><Moon className="h-4 w-4" /> Sleep</Button><Button variant="danger" onClick={() => void remove()}><Trash2 className="h-4 w-4" /> Delete</Button></div> : null}
+        footer={
+          selectedAgent ? (
+            <div className="flex flex-wrap gap-2">
+              <Button variant="outline" onClick={() => void wake()}><SunMedium className="h-4 w-4" /> Wake</Button>
+              <Button variant="outline" onClick={() => void sleep()}><Moon className="h-4 w-4" /> Sleep</Button>
+              {selectedAgent.parent_id !== null ? (
+                <Button variant="outline" onClick={() => void detachAgent()}>Detach from parent</Button>
+              ) : null}
+              <Button variant="danger" onClick={() => void remove()}><Trash2 className="h-4 w-4" /> Delete</Button>
+            </div>
+          ) : null
+        }
       >
         {selectedAgent ? (
           <div className="space-y-4">
@@ -610,6 +678,35 @@ function layoutAgents(agents: Agent[]) {
   });
 
   return { nodes: positioned, edges };
+}
+
+/**
+ * Client-side mirror of the server's `wouldCreateCycle` check in
+ * src/lib/store.ts — lets the UI refuse an obviously-invalid reparent
+ * immediately instead of round-tripping to the API. The server check
+ * remains authoritative.
+ */
+function wouldCreateCycleClient(agents: Agent[], id: number, newParentId: number): boolean {
+  if (id === newParentId) {
+    return true;
+  }
+
+  const byId = new Map(agents.map((agent) => [agent.id, agent]));
+  const visited = new Set<number>();
+  let cursor: number | null = newParentId;
+
+  while (cursor !== null) {
+    if (cursor === id) {
+      return true;
+    }
+    if (visited.has(cursor)) {
+      return true;
+    }
+    visited.add(cursor);
+    cursor = byId.get(cursor)?.parent_id ?? null;
+  }
+
+  return false;
 }
 
 function nearestNode(nodes: Node<AgentNodeData>[], sourceId: string, x: number, y: number) {

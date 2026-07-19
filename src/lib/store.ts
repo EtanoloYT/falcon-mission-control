@@ -19,6 +19,23 @@ function buildAgentTree(agents: Agent[]) {
     }
   }
 
+  // Defensive: any agent not reachable from a root (e.g. because of a
+  // pre-existing cycle in the data) must still be surfaced somewhere,
+  // otherwise it silently vanishes from the UI while remaining in the DB.
+  const reachable = new Set<number>();
+  const visit = (node: AgentTree) => {
+    reachable.add(node.id);
+    node.children.forEach(visit);
+  };
+  roots.forEach(visit);
+
+  for (const agent of byId.values()) {
+    if (!reachable.has(agent.id)) {
+      roots.push(agent);
+      reachable.add(agent.id);
+    }
+  }
+
   const sortTree = (nodes: AgentTree[]) => {
     nodes.sort((left, right) => left.id - right.id || left.name.localeCompare(right.name));
     nodes.forEach((node) => sortTree(node.children));
@@ -212,15 +229,80 @@ export function sleepAgent(id: number) {
   return getAgent(id);
 }
 
-export function moveAgent(id: number, newParentId: number | null) {
+export const MOVE_AGENT_MAX_DEPTH = 50;
+
+export type MoveAgentResult =
+  | { ok: true; agent: Agent }
+  | { ok: false; reason: "not_found" | "parent_not_found" | "self_parent" | "cycle" };
+
+/**
+ * Returns true if `newParentId` is `id` itself or a descendant of `id` —
+ * i.e. making `newParentId` the parent of `id` would create a cycle.
+ * Walks the parent chain upward from `newParentId`, guarded by a visited
+ * Set and a max-depth cap so a pre-existing cycle in the data can't hang
+ * the request.
+ */
+export function wouldCreateCycle(db: ReturnType<typeof getDb>, id: number, newParentId: number): boolean {
+  if (newParentId === id) {
+    return true;
+  }
+
+  const visited = new Set<number>();
+  let cursor: number | null = newParentId;
+  let depth = 0;
+
+  while (cursor !== null && depth < MOVE_AGENT_MAX_DEPTH) {
+    if (cursor === id) {
+      return true;
+    }
+    if (visited.has(cursor)) {
+      // Pre-existing cycle unrelated to `id` — bail out rather than loop forever.
+      return true;
+    }
+    visited.add(cursor);
+
+    const row = db.prepare("SELECT parent_id FROM agents WHERE id = ?").get(cursor) as { parent_id: number | null } | undefined;
+    cursor = row?.parent_id ?? null;
+    depth += 1;
+  }
+
+  if (cursor !== null && depth >= MOVE_AGENT_MAX_DEPTH) {
+    // Chain too deep to resolve safely — treat as unsafe.
+    return true;
+  }
+
+  return false;
+}
+
+export function moveAgent(id: number, newParentId: number | null): MoveAgentResult {
   const db = getDb();
   const existing = getDb().prepare("SELECT * FROM agents WHERE id = ?").get(id) as AgentRow | undefined;
   if (!existing) {
-    return null;
+    return { ok: false, reason: "not_found" };
+  }
+
+  if (newParentId !== null) {
+    if (newParentId === id) {
+      return { ok: false, reason: "self_parent" };
+    }
+
+    const parentExists = getDb().prepare("SELECT id FROM agents WHERE id = ?").get(newParentId) as { id: number } | undefined;
+    if (!parentExists) {
+      return { ok: false, reason: "parent_not_found" };
+    }
+
+    if (wouldCreateCycle(db, id, newParentId)) {
+      return { ok: false, reason: "cycle" };
+    }
   }
 
   db.prepare("UPDATE agents SET parent_id = ? WHERE id = ?").run(newParentId, id);
-  return getAgent(id);
+  const updated = getAgent(id);
+  if (!updated) {
+    return { ok: false, reason: "not_found" };
+  }
+
+  return { ok: true, agent: updated };
 }
 
 export function listTasks(filters: { project_id?: number; status?: Task["status"]; agent_id?: number }) {
