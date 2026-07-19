@@ -45,6 +45,55 @@ export async function openclawAgentsAdd(name: string, opts?: { model?: string })
   return parsed;
 }
 
+export type OpenclawAgentListEntry = {
+  id: string;
+  name?: string;
+  model?: string;
+  workspace?: string;
+  agentDir?: string;
+  isDefault?: boolean;
+  identityEmoji?: string;
+  identitySource?: string;
+  bindings?: number;
+  routes?: string[];
+  providers?: string[];
+};
+
+/**
+ * Shells out to `openclaw agents list --json` (read-only — never add/delete).
+ * Throws a descriptive error on: CLI missing (ENOENT), non-zero exit, or
+ * unparseable/non-array output. Callers must not treat failures as "no agents".
+ */
+export async function openclawAgentsList(): Promise<OpenclawAgentListEntry[]> {
+  let result: { code: number; stdout: string; stderr: string };
+  try {
+    result = await run(["agents", "list", "--json"]);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    throw new Error(
+      `openclaw CLI not found or failed to launch (is it installed and on PATH?): ${message}`
+    );
+  }
+
+  const { code, stdout, stderr } = result;
+  if (code !== 0) {
+    throw new Error(`openclaw agents list failed (exit ${code}): ${stderr || stdout || "no output"}`);
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(stdout);
+  } catch {
+    throw new Error(`openclaw agents list returned unparseable JSON: ${stdout.slice(0, 500)}`);
+  }
+
+  if (!Array.isArray(parsed)) {
+    throw new Error(`openclaw agents list returned unexpected shape (expected array): ${stdout.slice(0, 500)}`);
+  }
+
+  return parsed as OpenclawAgentListEntry[];
+}
+
 export async function openclawAgentsDelete(id: string): Promise<void> {
   const { code, stdout, stderr } = await run(["agents", "delete", id, "--force", "--json"]);
   if (code !== 0) {

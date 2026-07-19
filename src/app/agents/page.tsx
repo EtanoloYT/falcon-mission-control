@@ -13,7 +13,14 @@ import { cn } from "@/lib/utils";
 import type { Agent, Event, Project, Task } from "@/lib/schemas";
 import { Handle, MiniMap, Position, ReactFlow, Background, Controls, type Edge, type Node, type NodeProps, useEdgesState, useNodesState } from "@xyflow/react";
 import dagre from "dagre";
-import { Copy, Moon, Plus, SunMedium, Trash2 } from "lucide-react";
+import { Copy, Download, Moon, Plus, SunMedium, Trash2 } from "lucide-react";
+
+type ImportSummary = {
+  imported: number;
+  updated: number;
+  skipped: number;
+  details: Array<{ openclawId: string; name: string; action: "imported" | "updated" | "skipped"; reason?: string }>;
+};
 
 type AgentNodeData = {
   agent: Agent;
@@ -139,6 +146,9 @@ export default function AgentsPage() {
   const [activityLoading, setActivityLoading] = useState(false);
   const { latestEvent } = useLiveEvents();
   const nowMs = useNowTick(FRESHNESS_TICK_MS);
+  const [importing, setImporting] = useState(false);
+  const [importError, setImportError] = useState<string | null>(null);
+  const [importSummary, setImportSummary] = useState<ImportSummary | null>(null);
 
   const load = async () => {
     const nextAgents = await apiGet<Agent[]>("/api/agents/flat");
@@ -260,6 +270,20 @@ export default function AgentsPage() {
     await load();
   }
 
+  async function importFromOpenclaw() {
+    setImporting(true);
+    setImportError(null);
+    try {
+      const summary = await apiPost<ImportSummary>("/api/agents/import");
+      setImportSummary(summary);
+      await load();
+    } catch (err) {
+      setImportError(err instanceof Error ? err.message : "Import failed");
+    } finally {
+      setImporting(false);
+    }
+  }
+
   const hasCEO = agents.some((agent) => agent.role === "ceo");
   const sortedAgents = [...agents].sort((a, b) => a.name.localeCompare(b.name));
 
@@ -270,10 +294,45 @@ export default function AgentsPage() {
           <div className="text-xs uppercase tracking-[0.2em] text-zinc-500">Agents</div>
           <h1 className="text-2xl font-semibold text-zinc-50">Organizational tree</h1>
         </div>
-        <Button onClick={() => setShowCreate(true)}>
-          <Plus className="h-4 w-4" /> Add agent
-        </Button>
+        <div className="flex gap-2">
+          <Button variant="outline" onClick={() => void importFromOpenclaw()} disabled={importing}>
+            <Download className="h-4 w-4" /> {importing ? "Importing…" : "Import from OpenClaw"}
+          </Button>
+          <Button onClick={() => setShowCreate(true)}>
+            <Plus className="h-4 w-4" /> Add agent
+          </Button>
+        </div>
       </div>
+
+      {importError ? (
+        <Card className="border-rose-900 bg-rose-500/5">
+          <CardBody className="text-sm text-rose-300">
+            Import failed: {importError}
+          </CardBody>
+        </Card>
+      ) : null}
+
+      {importSummary ? (
+        <Card className="border-zinc-800 bg-zinc-950/70">
+          <CardBody className="text-sm text-zinc-300">
+            Import complete — {importSummary.imported} imported, {importSummary.updated} updated, {importSummary.skipped} skipped.
+            <span className="ml-2 text-xs text-zinc-500">
+              Note: imported agents cannot yet be dispatched to (sessions_send/sessions_spawn are unavailable on this gateway build).
+            </span>
+          </CardBody>
+        </Card>
+      ) : null}
+
+      {agents.length === 0 ? (
+        <Card className="border-dashed border-zinc-800 bg-zinc-950/70">
+          <CardBody className="space-y-3 text-center">
+            <div className="text-sm text-zinc-300">No agents yet. Import your existing OpenClaw agents to get started.</div>
+            <Button onClick={() => void importFromOpenclaw()} disabled={importing}>
+              <Download className="h-4 w-4" /> {importing ? "Importing…" : "Import from OpenClaw"}
+            </Button>
+          </CardBody>
+        </Card>
+      ) : null}
 
       {!hasCEO ? (
         <Card className="border-dashed border-zinc-800 bg-zinc-950/70">

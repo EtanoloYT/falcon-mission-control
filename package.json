@@ -11,7 +11,8 @@
     "start": "next start -p 3030",
     "lint": "eslint",
     "typecheck": "tsc --noEmit",
-    "seed": "tsx scripts/seed.ts"
+    "seed": "NODE_OPTIONS=--conditions=react-server tsx scripts/seed.ts",
+    "import-agents": "NODE_OPTIONS=--conditions=react-server tsx scripts/import-agents.ts"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.3.1",
@@ -27,6 +28,7 @@
     "next": "15.5.15",
     "react": "19",
     "react-dom": "19",
+    "server-only": "^0.0.1",
     "tailwind-merge": "^3.5.0",
     "tsx": "^4.21.0",
     "ws": "^8.20.0",
