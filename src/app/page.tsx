@@ -1,65 +1,268 @@
-import Image from "next/image";
+"use client";
+
+import { useEffect, useMemo, useState, type ComponentType } from "react";
+
+import Link from "next/link";
+import { Activity, ArrowRight, Bot, CheckCircle2, CircleSlash, Monitor } from "lucide-react";
+
+import { EventRow } from "@/components/event-row";
+import { useLiveEvents } from "@/components/live-events-provider";
+import { Badge, Button, Card, CardBody, CardHeader, Skeleton } from "@/components/ui";
+import { apiGet } from "@/lib/client";
+import { cn } from "@/lib/utils";
+import type { Agent, Event, Project, Task } from "@/lib/schemas";
+
+type DashboardState = {
+  gateway: { reachable: boolean; uptime?: number } | null;
+  projects: Project[];
+  agents: Agent[];
+  runningTasks: Task[];
+  events: Event[];
+};
+
+const emptyState: DashboardState = {
+  gateway: null,
+  projects: [],
+  agents: [],
+  runningTasks: [],
+  events: [],
+};
+
+const dashboardRefreshKinds = new Set([
+  "project.created",
+  "project.updated",
+  "project.deleted",
+  "agent.created",
+  "agent.updated",
+  "agent.deleted",
+  "agent.status",
+  "task.created",
+  "task.updated",
+  "task.deleted",
+  "task.comment",
+]);
+
+function countActiveAgents(agents: Agent[]) {
+  return agents.filter((agent) => ["idle", "busy"].includes(agent.status)).length;
+}
 
 export default function Home() {
+  const [state, setState] = useState<DashboardState>(emptyState);
+  const [loading, setLoading] = useState(true);
+  const { latestEvent } = useLiveEvents();
+
+  useEffect(() => {
+    let mounted = true;
+
+    const load = async () => {
+      try {
+        const [gateway, projects, agents, runningTasks, events] = await Promise.all([
+          apiGet<{ ok: true; gateway: { reachable: boolean; uptime?: number } }>("/api/health"),
+          apiGet<Project[]>("/api/projects"),
+          apiGet<Agent[]>("/api/agents/flat"),
+          apiGet<Task[]>("/api/tasks?status=in_progress"),
+          apiGet<Event[]>("/api/events?limit=30"),
+        ]);
+
+        if (mounted) {
+          setState({
+            gateway: gateway.gateway,
+            projects,
+            agents,
+            runningTasks,
+            events,
+          });
+        }
+      } finally {
+        if (mounted) {
+          setLoading(false);
+        }
+      }
+    };
+
+    void load();
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!latestEvent || !dashboardRefreshKinds.has(latestEvent.kind)) {
+      return;
+    }
+
+    void (async () => {
+      const [gateway, projects, agents, runningTasks, events] = await Promise.all([
+        apiGet<{ ok: true; gateway: { reachable: boolean; uptime?: number } }>("/api/health"),
+        apiGet<Project[]>("/api/projects"),
+        apiGet<Agent[]>("/api/agents/flat"),
+        apiGet<Task[]>("/api/tasks?status=in_progress"),
+        apiGet<Event[]>("/api/events?limit=30"),
+      ]);
+
+      setState({
+        gateway: gateway.gateway,
+        projects,
+        agents,
+        runningTasks,
+        events,
+      });
+    })();
+  }, [latestEvent]);
+
+  const activeAgents = countActiveAgents(state.agents);
+  const last24hEvents = useMemo(() => state.events.filter((event) => event.ts >= Date.now() - 24 * 60 * 60 * 1000), [state.events]);
+
   return (
-    <div className="flex flex-col flex-1 items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex flex-1 w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
+    <div className="space-y-5">
+      <section className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
+        <StatCard
+          title="Gateway"
+          value={state.gateway?.reachable ? "Online" : "Offline"}
+          description={state.gateway?.reachable ? "OpenClaw gateway reachable" : "Gateway unavailable"}
+          icon={state.gateway?.reachable ? Monitor : CircleSlash}
+          accent={state.gateway?.reachable ? "text-emerald-300" : "text-rose-300"}
+          loading={loading}
         />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the page.tsx file.
-          </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Learning
-            </a>{" "}
-            center.
-          </p>
+        <StatCard title="Active agents" value={String(activeAgents)} description="idle + busy" icon={Bot} loading={loading} />
+        <StatCard title="Running tasks" value={String(state.runningTasks.length)} description="in progress" icon={CheckCircle2} loading={loading} />
+        <StatCard title="Last 24h events" value={String(last24hEvents.length)} description="live updates" icon={Activity} loading={loading} />
+      </section>
+
+      <section className="grid min-w-0 grid-cols-1 gap-5 xl:grid-cols-[1.6fr_1fr]">
+        <Card className="min-w-0 border-zinc-800 bg-zinc-950/70">
+          <CardHeader className="flex flex-wrap items-center justify-between gap-2">
+            <div className="min-w-0">
+              <div className="text-sm font-medium text-zinc-100">Projects</div>
+              <div className="text-xs text-zinc-500">Active work and delivery progress</div>
+            </div>
+            <Link href="/projects" className="shrink-0">
+              <Button variant="outline" size="sm">
+                View all <ArrowRight className="h-4 w-4" />
+              </Button>
+            </Link>
+          </CardHeader>
+          <CardBody className="grid gap-3 sm:grid-cols-2">
+            {loading ? (
+              Array.from({ length: 4 }).map((_, index) => <Skeleton key={index} className="h-32" />)
+            ) : state.projects.length === 0 ? (
+              <div className="rounded-lg border border-dashed border-zinc-800 px-4 py-6 text-sm text-zinc-500">Create a project to start tracking work.</div>
+            ) : (
+              state.projects.map((project) => (
+                <ProjectCard key={project.id} project={project} taskCount={state.runningTasks.filter((task) => task.project_id === project.id).length} />
+              ))
+            )}
+          </CardBody>
+        </Card>
+
+        <Card className="min-w-0 border-zinc-800 bg-zinc-950/70">
+          <CardHeader>
+            <div className="text-sm font-medium text-zinc-100">Live feed</div>
+            <div className="text-xs text-zinc-500">Reverse chron, powered by SSE</div>
+          </CardHeader>
+          <CardBody className="min-w-0 space-y-2">
+            {state.events.slice(0, 30).map((event) => (
+              <EventRow key={event.id} event={event} compact />
+            ))}
+            {state.events.length === 0 && !loading ? <div className="text-sm text-zinc-500">No events yet.</div> : null}
+          </CardBody>
+        </Card>
+      </section>
+
+      <Card className="border-zinc-800 bg-zinc-950/70">
+        <CardHeader>
+          <div className="text-sm font-medium text-zinc-100">Agents</div>
+          <div className="text-xs text-zinc-500">Compact tree view</div>
+        </CardHeader>
+        <CardBody>{state.agents.length === 0 ? <div className="text-sm text-zinc-500">Create your CEO agent to start the tree.</div> : <AgentTree agents={state.agents} />}</CardBody>
+      </Card>
+    </div>
+  );
+}
+
+function StatCard({
+  title,
+  value,
+  description,
+  icon: Icon,
+  accent = "text-zinc-100",
+  loading,
+}: {
+  title: string;
+  value: string;
+  description: string;
+  icon: ComponentType<{ className?: string }>;
+  accent?: string;
+  loading: boolean;
+}) {
+  return (
+    <Card className="border-zinc-800 bg-zinc-950/70">
+      <CardBody className="flex items-start justify-between gap-3">
+        <div>
+          <div className="text-xs uppercase tracking-[0.2em] text-zinc-500">{title}</div>
+          {loading ? <Skeleton className="mt-2 h-8 w-24" /> : <div className={cn("mt-2 text-3xl font-semibold", accent)}>{value}</div>}
+          <div className="mt-1 text-xs text-zinc-500">{description}</div>
         </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-          <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={16}
-            />
-            Deploy Now
-          </a>
-          <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Documentation
-          </a>
+        <div className="rounded-xl border border-zinc-800 bg-zinc-900/80 p-3 text-zinc-300">
+          <Icon className="h-5 w-5" />
         </div>
-      </main>
+      </CardBody>
+    </Card>
+  );
+}
+
+function ProjectCard({ project, taskCount }: { project: Project; taskCount: number }) {
+  return (
+    <Link href={`/projects/${project.id}`} className="group block">
+      <div className="h-full min-w-0 rounded-xl border border-zinc-800 bg-zinc-950/80 p-4 transition-colors group-hover:border-amber-500/40 group-hover:bg-zinc-900/80">
+        <div className="flex min-w-0 items-center justify-between gap-3">
+          <div className="min-w-0">
+            <div className="truncate text-sm font-medium text-zinc-100">{project.name}</div>
+            <div className="mt-1 line-clamp-2 text-xs leading-5 text-zinc-500">{project.description || "No project brief yet."}</div>
+          </div>
+          <Badge className="shrink-0">{project.status}</Badge>
+        </div>
+        <div className="mt-4 h-2 rounded-full bg-zinc-900">
+          <div className="h-2 rounded-full bg-amber-500" style={{ width: `${Math.min(100, taskCount * 20)}%` }} />
+        </div>
+        <div className="mt-2 text-xs text-zinc-500">{taskCount} active task(s)</div>
+      </div>
+    </Link>
+  );
+}
+
+function AgentTree({ agents }: { agents: Agent[] }) {
+  const roots = agents.filter((agent) => agent.parent_id === null);
+
+  return (
+    <div className="space-y-2 text-sm">
+      {roots.map((agent) => (
+        <AgentBranch key={agent.id} agent={agent} agents={agents} />
+      ))}
+    </div>
+  );
+}
+
+function AgentBranch({ agent, agents }: { agent: Agent; agents: Agent[] }) {
+  const children = agents.filter((entry) => entry.parent_id === agent.id);
+  return (
+    <div className="space-y-2">
+      <Link href="/agents" className="block rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2 text-zinc-200 hover:border-amber-500/40">
+        <div className="flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <span className="h-2.5 w-2.5 rounded-full bg-amber-400" />
+            <span className="font-medium">{agent.name}</span>
+          </div>
+          <Badge>{agent.role}</Badge>
+        </div>
+      </Link>
+      {children.length > 0 ? (
+        <div className="border-l border-zinc-800 pl-4">
+          {children.map((child) => (
+            <AgentBranch key={child.id} agent={child} agents={agents} />
+          ))}
+        </div>
+      ) : null}
     </div>
   );
 }
