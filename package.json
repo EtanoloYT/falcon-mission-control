@@ -11,6 +11,7 @@
     "start": "next start -p 3030",
     "lint": "eslint",
     "typecheck": "tsc --noEmit",
+    "test:unit": "NODE_OPTIONS=--conditions=react-server tsx --test tests/openclaw-cli.test.ts",
     "seed": "NODE_OPTIONS=--conditions=react-server tsx scripts/seed.ts",
     "import-agents": "NODE_OPTIONS=--conditions=react-server tsx scripts/import-agents.ts"
   },

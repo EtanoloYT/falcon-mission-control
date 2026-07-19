@@ -169,11 +169,11 @@ export function updateAgent(
   const next = {
     name: input.name ?? existing.name,
     role: input.role ?? existing.role,
-    parent_id: input.parent_id ?? existing.parent_id,
+    parent_id: input.parent_id !== undefined ? input.parent_id : existing.parent_id,
     status: input.status ?? existing.status,
     soul: input.soul ?? existing.soul,
     config_json: stringifyJson(nextConfig),
-    last_seen: input.last_seen ?? existing.last_seen,
+    last_seen: input.last_seen !== undefined ? input.last_seen : existing.last_seen,
   };
 
   db.prepare(
@@ -352,14 +352,16 @@ export function createTask(input: {
 }) {
   const db = getDb();
   const timestamp = now();
+  const initialStatus = input.assigned_agent_id ? "assigned" : "backlog";
   const result = db
     .prepare(
-      "INSERT INTO tasks (project_id, title, description, status, priority, assigned_agent_id, created_by_agent_id, result, parent_task_id, created_at, updated_at) VALUES (?, ?, ?, 'backlog', ?, ?, ?, NULL, ?, ?, ?)"
+      "INSERT INTO tasks (project_id, title, description, status, priority, assigned_agent_id, created_by_agent_id, result, parent_task_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)"
     )
     .run(
       input.project_id,
       input.title,
       input.description ?? "",
+      initialStatus,
       input.priority ?? "normal",
       input.assigned_agent_id ?? null,
       input.created_by_agent_id ?? null,
@@ -383,10 +385,10 @@ export function updateTask(id: number, input: Partial<Pick<Task, "project_id" | 
     description: input.description ?? existing.description,
     status: input.status ?? existing.status,
     priority: input.priority ?? existing.priority,
-    assigned_agent_id: input.assigned_agent_id ?? existing.assigned_agent_id,
-    created_by_agent_id: input.created_by_agent_id ?? existing.created_by_agent_id,
-    result: input.result ?? existing.result,
-    parent_task_id: input.parent_task_id ?? existing.parent_task_id,
+    assigned_agent_id: input.assigned_agent_id !== undefined ? input.assigned_agent_id : existing.assigned_agent_id,
+    created_by_agent_id: input.created_by_agent_id !== undefined ? input.created_by_agent_id : existing.created_by_agent_id,
+    result: input.result !== undefined ? input.result : existing.result,
+    parent_task_id: input.parent_task_id !== undefined ? input.parent_task_id : existing.parent_task_id,
   };
 
   db.prepare(
@@ -434,7 +436,16 @@ export function claimTask(taskId: number, agentId: number) {
   return getTask(taskId);
 }
 
-export function resolveTaskCompletionStatus(projectId: number) {
+export function resolveTaskCompletionStatus(task: Task) {
+  if (task.assigned_agent_id) {
+    const assignee = getDb().prepare("SELECT role FROM agents WHERE id = ?").get(task.assigned_agent_id) as
+      | { role: Agent["role"] }
+      | undefined;
+    if (assignee?.role === "ceo") {
+      return "done" as const;
+    }
+  }
+
   const ceo = getDb()
     .prepare("SELECT id, status FROM agents WHERE role = 'ceo' ORDER BY id ASC LIMIT 1")
     .get() as { id: number; status: string } | undefined;
@@ -452,7 +463,7 @@ export function completeTask(taskId: number, result: string) {
     return null;
   }
 
-  const status = resolveTaskCompletionStatus(task.project_id);
+  const status = resolveTaskCompletionStatus(task);
   getDb().prepare("UPDATE tasks SET result = ?, status = ?, updated_at = ? WHERE id = ?").run(result, status, now(), taskId);
   return getTask(taskId);
 }

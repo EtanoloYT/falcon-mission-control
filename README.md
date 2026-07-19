@@ -9,6 +9,17 @@ Local-first single-user mission control for OpenClaw Gateway.
 4. Build/start: `pnpm build && pnpm start`.
 5. Optional seed: `pnpm seed`.
 
+## Automatic OpenClaw dispatch
+
+- Creating a task with an assignee immediately queues a real OpenClaw agent turn.
+- Creating an unassigned task automatically routes it to the CEO/orchestrator.
+- Assigning a backlog task or clicking **Wake** also starts the agent; Wake picks the agent's highest-priority pending task first.
+- Mission Control records `busy`/`idle`/`error`, `last_seen`, task progress, the final agent response, and dispatch failures automatically. Agents do not need a Mission Control API key in their prompt.
+- Orchestrators return a validated machine-readable subtask block; Mission Control creates and queues those tasks itself, so no Mission Control or Gateway credentials are ever put in an agent prompt.
+- Runs are serialized locally so a single-concurrency Ollama setup is not overloaded. Assigned work is recovered after Mission Control restarts.
+
+Optional environment controls: `OPENCLAW_BIN=/absolute/path/to/openclaw` and `OPENCLAW_TASK_TIMEOUT_SECONDS=900`.
+
 ## Agent API Quickstart
 ```bash
 # Agent creates a subtask

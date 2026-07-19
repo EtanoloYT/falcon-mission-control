@@ -1,11 +1,10 @@
 import { NextRequest } from "next/server";
 
 import { actorIsUser, withAuth } from "@/lib/auth";
-import { getDb } from "@/lib/db";
-import { emitEvent, recordEvent } from "@/lib/events";
+import { enqueueAgentWake } from "@/lib/dispatch";
 import { fail, ok } from "@/lib/http";
 import { readRouteId } from "@/lib/route";
-import { getAgent, wakeAgent } from "@/lib/store";
+import { getAgent } from "@/lib/store";
 
 export const POST = withAuth(async (_request: NextRequest, context, routeContext) => {
   if (!actorIsUser(context.actor)) {
@@ -18,15 +17,9 @@ export const POST = withAuth(async (_request: NextRequest, context, routeContext
     return fail("Agent not found", 404);
   }
 
-  const event = getDb().transaction(() => {
-    const updated = wakeAgent(id);
-    if (!updated) {
-      throw new Error("Agent not found");
-    }
-
-    return recordEvent({ kind: "agent.status", payload: { agent: updated } }, false);
-  })();
-
-  emitEvent(event);
-  return ok({});
+  const outcome = enqueueAgentWake(id);
+  if (!outcome.queued) {
+    return fail(outcome.reason ?? "OpenClaw wake failed", 409);
+  }
+  return ok(outcome, 202);
 }, { allow: ["user"] });

@@ -1,6 +1,7 @@
 import "server-only";
 
 import { spawn } from "node:child_process";
+import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 
@@ -14,15 +15,57 @@ export function slugifyAgentId(name: string) {
   return `mc-${base}-${Math.random().toString(16).slice(2, 8)}`;
 }
 
-function run(args: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
+const MAX_CAPTURE_BYTES = 8 * 1024 * 1024;
+
+function resolveOpenclawExecutable() {
+  const configured = process.env.OPENCLAW_BIN?.trim();
+  if (configured) {
+    return configured;
+  }
+
+  for (const candidate of ["/opt/homebrew/bin/openclaw", "/usr/local/bin/openclaw"]) {
+    if (fs.existsSync(candidate)) {
+      return candidate;
+    }
+  }
+
+  return "openclaw";
+}
+
+function appendBounded(current: string, chunk: Buffer) {
+  if (Buffer.byteLength(current) >= MAX_CAPTURE_BYTES) {
+    return current;
+  }
+
+  return (current + chunk.toString()).slice(0, MAX_CAPTURE_BYTES);
+}
+
+function run(
+  args: string[],
+  options: { timeoutMs?: number } = {}
+): Promise<{ code: number; stdout: string; stderr: string; timedOut: boolean }> {
   return new Promise((resolve, reject) => {
-    const proc = spawn("openclaw", args, { stdio: ["ignore", "pipe", "pipe"] });
+    const proc = spawn(resolveOpenclawExecutable(), args, { stdio: ["ignore", "pipe", "pipe"] });
     let stdout = "";
     let stderr = "";
-    proc.stdout.on("data", (b) => (stdout += b.toString()));
-    proc.stderr.on("data", (b) => (stderr += b.toString()));
+    let timedOut = false;
+    let timeout: NodeJS.Timeout | undefined;
+
+    if (options.timeoutMs) {
+      timeout = setTimeout(() => {
+        timedOut = true;
+        proc.kill("SIGTERM");
+      }, options.timeoutMs);
+      timeout.unref();
+    }
+
+    proc.stdout.on("data", (chunk: Buffer) => (stdout = appendBounded(stdout, chunk)));
+    proc.stderr.on("data", (chunk: Buffer) => (stderr = appendBounded(stderr, chunk)));
     proc.on("error", reject);
-    proc.on("close", (code) => resolve({ code: code ?? 0, stdout, stderr }));
+    proc.on("close", (code) => {
+      if (timeout) clearTimeout(timeout);
+      resolve({ code: code ?? 0, stdout, stderr, timedOut });
+    });
   });
 }
 
@@ -99,4 +142,128 @@ export async function openclawAgentsDelete(id: string): Promise<void> {
   if (code !== 0) {
     throw new Error(`openclaw agents delete failed (${code}): ${stderr || stdout}`);
   }
+}
+
+type OpenclawAgentPayload = {
+  text?: string;
+  mediaUrl?: string | null;
+};
+
+type OpenclawAgentJson = {
+  runId?: string;
+  status?: string;
+  summary?: string;
+  error?: string;
+  result?: {
+    payloads?: OpenclawAgentPayload[];
+    finalAssistantVisibleText?: string;
+    finalAssistantRawText?: string;
+    meta?: {
+      durationMs?: number;
+      agentMeta?: {
+        sessionId?: string;
+        provider?: string;
+        model?: string;
+      };
+    };
+  };
+};
+
+export type OpenclawAgentRun = {
+  runId: string | null;
+  text: string;
+  durationMs: number | null;
+  sessionId: string | null;
+  provider: string | null;
+  model: string | null;
+};
+
+function parseJsonObject(stdout: string): OpenclawAgentJson {
+  const jsonStart = stdout.indexOf("{");
+  if (jsonStart < 0) {
+    throw new Error(`OpenClaw returned no JSON: ${stdout.slice(0, 500) || "empty output"}`);
+  }
+
+  try {
+    return JSON.parse(stdout.slice(jsonStart)) as OpenclawAgentJson;
+  } catch {
+    throw new Error(`OpenClaw returned invalid JSON: ${stdout.slice(0, 500)}`);
+  }
+}
+
+export function parseOpenclawAgentOutput(stdout: string): OpenclawAgentRun {
+  const parsed = parseJsonObject(stdout);
+  if (parsed.status !== "ok") {
+    throw new Error(parsed.error || parsed.summary || `OpenClaw run ended with status ${parsed.status ?? "unknown"}`);
+  }
+
+  const payloadText = parsed.result?.payloads
+    ?.map((payload) => payload.text?.trim())
+    .filter((text): text is string => Boolean(text))
+    .join("\n\n");
+  const text =
+    payloadText ||
+    parsed.result?.finalAssistantVisibleText?.trim() ||
+    parsed.result?.finalAssistantRawText?.trim() ||
+    "OpenClaw completed the task without a text response.";
+  const agentMeta = parsed.result?.meta?.agentMeta;
+
+  return {
+    runId: parsed.runId ?? null,
+    text,
+    durationMs: parsed.result?.meta?.durationMs ?? null,
+    sessionId: agentMeta?.sessionId ?? null,
+    provider: agentMeta?.provider ?? null,
+    model: agentMeta?.model ?? null,
+  };
+}
+
+/**
+ * Run a real agent turn through the supported OpenClaw CLI/Gateway path.
+ * The Gateway HTTP tools surface deliberately blocks sessions_send and
+ * sessions_spawn, so Mission Control must use the agent RPC exposed here.
+ */
+export async function openclawAgentRun(input: {
+  agentId: string;
+  sessionKey: string;
+  message: string;
+  thinking?: "off" | "minimal" | "low" | "medium" | "high";
+  timeoutSeconds?: number;
+}): Promise<OpenclawAgentRun> {
+  const timeoutSeconds = input.timeoutSeconds ?? 900;
+  const messageDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "falcon-openclaw-"));
+  const messagePath = path.join(messageDirectory, "message.txt");
+  fs.writeFileSync(messagePath, input.message, { encoding: "utf8", mode: 0o600 });
+  const args = [
+    "agent",
+    "--agent",
+    input.agentId,
+    "--session-key",
+    input.sessionKey,
+    "--message-file",
+    messagePath,
+    "--thinking",
+    input.thinking ?? "low",
+    "--timeout",
+    String(timeoutSeconds),
+    "--json",
+  ];
+  let result: Awaited<ReturnType<typeof run>>;
+  try {
+    result = await run(args, {
+      timeoutMs: (timeoutSeconds + 30) * 1000,
+    });
+  } finally {
+    fs.rmSync(messageDirectory, { recursive: true, force: true });
+  }
+  const { code, stdout, stderr, timedOut } = result;
+
+  if (timedOut) {
+    throw new Error(`OpenClaw agent timed out after ${timeoutSeconds} seconds`);
+  }
+  if (code !== 0) {
+    throw new Error(`OpenClaw agent failed (exit ${code}): ${(stderr || stdout || "no output").slice(0, 2000)}`);
+  }
+
+  return parseOpenclawAgentOutput(stdout);
 }

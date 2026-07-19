@@ -6,6 +6,7 @@ import { emitEvent, recordEvent } from "@/lib/events";
 import { fail, ok } from "@/lib/http";
 import { readRouteId } from "@/lib/route";
 import { taskPatchSchema } from "@/lib/schemas";
+import { enqueueTaskDispatch } from "@/lib/dispatch";
 import { deleteTask, getTask, listTaskComments, updateTask } from "@/lib/store";
 
 export const GET = withAuth(async (_request: NextRequest, _context, routeContext) => {
@@ -40,6 +41,17 @@ export const PATCH = withAuth(async (request: NextRequest, context, routeContext
   })();
 
   emitEvent(event);
+  const assignedAgentChanged =
+    body.assigned_agent_id !== undefined &&
+    body.assigned_agent_id !== null &&
+    body.assigned_agent_id !== task.assigned_agent_id;
+  const explicitlyAssigned = body.status === "assigned" && (body.assigned_agent_id ?? task.assigned_agent_id);
+  if (assignedAgentChanged || explicitlyAssigned) {
+    enqueueTaskDispatch({
+      taskId: id,
+      agentId: body.assigned_agent_id ?? task.assigned_agent_id,
+    });
+  }
   return ok({});
 }, { allow: ["user", "agent"] });
 

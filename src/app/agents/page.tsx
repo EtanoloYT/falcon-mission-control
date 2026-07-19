@@ -334,7 +334,7 @@ export default function AgentsPage() {
           <CardBody className="text-sm text-zinc-300">
             Import complete — {importSummary.imported} imported, {importSummary.updated} updated, {importSummary.skipped} skipped.
             <span className="ml-2 text-xs text-zinc-500">
-              Note: imported agents cannot yet be dispatched to (sessions_send/sessions_spawn are unavailable on this gateway build).
+              Imported agents are linked by OpenClaw ID and can be woken or dispatched immediately.
             </span>
           </CardBody>
         </Card>

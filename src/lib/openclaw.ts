@@ -4,8 +4,6 @@ export const openclawToolAllowlist = new Set([
   "sessions_list",
   "session_status",
   "sessions_history",
-  "sessions_send",
-  "sessions_spawn",
   "agents_list",
 ]);
 
@@ -30,7 +28,7 @@ export async function invoke<T = unknown>(
       authorization: `Bearer ${token}`,
       "content-type": "application/json",
     },
-    body: JSON.stringify({ tool, args, sessionKey }),
+    body: JSON.stringify({ name: tool, args, sessionKey }),
   });
 
   if (response.status === 404) {
@@ -47,11 +45,12 @@ export async function invoke<T = unknown>(
       content?: Array<{ type?: string; text?: string }>;
       details?: unknown;
     };
-    error?: string;
+    error?: string | { message?: string; type?: string };
   };
 
   if (!envelope.ok) {
-    throw new Error(envelope.error ?? "OpenClaw gateway returned an error");
+    const message = typeof envelope.error === "string" ? envelope.error : envelope.error?.message;
+    throw new Error(message ?? "OpenClaw gateway returned an error");
   }
 
   const text = envelope.result?.content?.[0]?.text;

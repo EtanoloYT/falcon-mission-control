@@ -157,17 +157,18 @@ export const heartbeatSchema = z.object({}).strict();
 
 export const taskCreateSchema = z.object({
   project_id: z.number().int().positive(),
-  title: z.string().min(1),
-  description: z.string().optional(),
+  title: z.string().trim().min(1).max(300),
+  description: z.string().max(30_000).optional(),
   priority: taskPrioritySchema.optional(),
   assigned_agent_id: z.number().int().positive().nullable().optional(),
   parent_task_id: z.number().int().positive().nullable().optional(),
+  auto_dispatch: z.boolean().optional(),
 });
 
 export const taskPatchSchema = z.object({
   project_id: z.number().int().positive().optional(),
-  title: z.string().min(1).optional(),
-  description: z.string().optional(),
+  title: z.string().trim().min(1).max(300).optional(),
+  description: z.string().max(30_000).optional(),
   status: taskStatusSchema.optional(),
   priority: taskPrioritySchema.optional(),
   assigned_agent_id: z.number().int().positive().nullable().optional(),

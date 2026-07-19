@@ -246,6 +246,8 @@ export default function ProjectBoardPage() {
       }
 
       setDispatchOutcome({ tool: payload.data!.tool });
+      await load();
+      await openTask(taskId);
     } catch (error) {
       setDispatchError(error instanceof Error ? error.message : "Dispatch failed.");
     } finally {
@@ -481,7 +483,9 @@ export default function ProjectBoardPage() {
                 <div className="rounded-md border border-emerald-900/60 bg-emerald-500/10 px-3 py-2 text-xs text-emerald-400">
                   Dispatched via{" "}
                   <span className="font-medium">
-                    {dispatchOutcome.tool === "sessions_spawn" ? "sessions_spawn (new session)" : "sessions_send (existing session)"}
+                    {dispatchOutcome.tool === "openclaw_agent"
+                      ? "OpenClaw agent runner (queued)"
+                      : dispatchOutcome.tool}
                   </span>
                   .
                 </div>
@@ -601,7 +605,7 @@ export default function ProjectBoardPage() {
             <label className="block space-y-2">
               <Label>Assign to</Label>
               <Select value={createForm.assigned_agent_id} onChange={(event) => setCreateForm((value) => ({ ...value, assigned_agent_id: event.target.value }))}>
-                <option value="">Unassigned</option>
+                <option value="">CEO / orchestrator (automatic)</option>
                 {agents.map((agent) => (
                   <option key={agent.id} value={agent.id}>
                     {agent.name}
