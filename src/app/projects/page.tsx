@@ -5,7 +5,7 @@ import { useEffect, useMemo, useState } from "react";
 
 import { useLiveEvents } from "@/components/live-events-provider";
 import { Badge, Button, Card, CardBody, CardHeader, Input, Label, Modal, Textarea } from "@/components/ui";
-import { apiGet, apiPost } from "@/lib/client";
+import { apiDelete, apiGet, apiPost } from "@/lib/client";
 import type { Project, Task } from "@/lib/schemas";
 
 export default function ProjectsPage() {
@@ -15,6 +15,9 @@ export default function ProjectsPage() {
   const [showCreate, setShowCreate] = useState(false);
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
+  const [deleteTarget, setDeleteTarget] = useState<Project | null>(null);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
   const { latestEvent } = useLiveEvents();
 
   const load = async () => {
@@ -54,6 +57,23 @@ export default function ProjectsPage() {
     await load();
   };
 
+  const deleteProject = async () => {
+    if (!deleteTarget) {
+      return;
+    }
+    setDeleting(true);
+    setDeleteError(null);
+    try {
+      await apiDelete(`/api/projects/${deleteTarget.id}`);
+      setDeleteTarget(null);
+      await load();
+    } catch (error) {
+      setDeleteError(error instanceof Error ? error.message : "Failed to delete project.");
+    } finally {
+      setDeleting(false);
+    }
+  };
+
   return (
     <div className="space-y-5">
       <div className="flex items-end justify-between gap-3">
@@ -80,12 +100,27 @@ export default function ProjectsPage() {
             return (
               <Link key={project.id} href={`/projects/${project.id}`}>
                 <Card className="h-full border-zinc-800 bg-zinc-950/70 transition-colors hover:border-amber-500/40 hover:bg-zinc-900/70">
-                  <CardHeader className="flex items-center justify-between">
-                    <div>
+                  <CardHeader className="flex items-center justify-between gap-3">
+                    <div className="min-w-0">
                       <div className="text-sm font-medium text-zinc-100">{project.name}</div>
                       <div className="text-xs text-zinc-500">{project.description || "No brief yet."}</div>
                     </div>
-                    <Badge>{project.status}</Badge>
+                    <div className="flex shrink-0 items-center gap-2">
+                      <Badge>{project.status}</Badge>
+                      <Button
+                        variant="danger"
+                        size="sm"
+                        type="button"
+                        onClick={(event) => {
+                          event.preventDefault();
+                          event.stopPropagation();
+                          setDeleteError(null);
+                          setDeleteTarget(project);
+                        }}
+                      >
+                        Delete
+                      </Button>
+                    </div>
                   </CardHeader>
                   <CardBody>
                     <div className="h-2 rounded-full bg-zinc-900">
@@ -127,6 +162,42 @@ export default function ProjectsPage() {
             <Label>Description</Label>
             <Textarea value={description} onChange={(event) => setDescription(event.target.value)} rows={8} className="font-mono" placeholder="Project brief for the CEO..." />
           </div>
+        </div>
+      </Modal>
+
+      <Modal
+        open={deleteTarget !== null}
+        title="Delete project"
+        onClose={() => {
+          if (!deleting) {
+            setDeleteTarget(null);
+          }
+        }}
+        footer={
+          <div className="flex justify-end gap-2">
+            <Button variant="outline" onClick={() => setDeleteTarget(null)} type="button" disabled={deleting}>
+              Cancel
+            </Button>
+            <Button variant="danger" onClick={() => void deleteProject()} type="button" disabled={deleting}>
+              {deleting ? "Deleting..." : "Delete project"}
+            </Button>
+          </div>
+        }
+      >
+        <div className="space-y-3 text-sm text-zinc-300">
+          {deleteTarget ? (
+            <>
+              <p>
+                Delete <span className="font-medium text-zinc-100">&ldquo;{deleteTarget.name}&rdquo;</span>? This will
+                permanently destroy{" "}
+                <span className="font-medium text-red-400">
+                  {taskStats.get(deleteTarget.id)?.total ?? 0} task{(taskStats.get(deleteTarget.id)?.total ?? 0) === 1 ? "" : "s"}
+                </span>{" "}
+                and all of their comments. This cannot be undone.
+              </p>
+              {deleteError ? <p className="text-xs text-red-400">{deleteError}</p> : null}
+            </>
+          ) : null}
         </div>
       </Modal>
     </div>
