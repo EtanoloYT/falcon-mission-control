@@ -106,6 +106,58 @@ export type OpenclawAgentListEntry = {
 };
 
 /**
+ * OpenClaw occasionally writes diagnostics to stdout before its `--json`
+ * payload (for example `[agents/auth-profiles] synced ...`). Find the first
+ * line that is itself valid JSON instead of assuming the first `[` belongs to
+ * the payload.
+ */
+export function parseOpenclawAgentsListOutput(stdout: string): OpenclawAgentListEntry[] {
+  const starts = [0];
+  for (let index = stdout.indexOf("\n"); index >= 0; index = stdout.indexOf("\n", index + 1)) {
+    starts.push(index + 1);
+  }
+
+  for (const start of starts) {
+    let cursor = start;
+    while (/\s/.test(stdout[cursor] ?? "")) cursor += 1;
+    if (stdout[cursor] !== "[") continue;
+
+    let depth = 0;
+    let inString = false;
+    let escaped = false;
+    let end = -1;
+    for (let index = cursor; index < stdout.length; index += 1) {
+      const character = stdout[index];
+      if (inString) {
+        if (escaped) escaped = false;
+        else if (character === "\\") escaped = true;
+        else if (character === '"') inString = false;
+        continue;
+      }
+      if (character === '"') inString = true;
+      else if (character === "[" || character === "{") depth += 1;
+      else if (character === "]" || character === "}") {
+        depth -= 1;
+        if (depth === 0) {
+          end = index + 1;
+          break;
+        }
+      }
+    }
+    if (end < 0) continue;
+
+    try {
+      const parsed = JSON.parse(stdout.slice(cursor, end)) as unknown;
+      if (Array.isArray(parsed)) return parsed as OpenclawAgentListEntry[];
+    } catch {
+      // This line may be a bracketed diagnostic. Try the next line.
+    }
+  }
+
+  throw new Error(`openclaw agents list returned unparseable JSON: ${stdout.slice(0, 500)}`);
+}
+
+/**
  * Shells out to `openclaw agents list --json` (read-only — never add/delete).
  * Throws a descriptive error on: CLI missing (ENOENT), non-zero exit, or
  * unparseable/non-array output. Callers must not treat failures as "no agents".
@@ -126,21 +178,7 @@ export async function openclawAgentsList(): Promise<OpenclawAgentListEntry[]> {
     throw new Error(`openclaw agents list failed (exit ${code}): ${stderr || stdout || "no output"}`);
   }
 
-  // The CLI can prefix a banner line, so start at the first JSON token rather
-  // than parsing the whole stream (matches openclawAgentsAdd).
-  let parsed: unknown;
-  const jsonStart = stdout.indexOf("[");
-  try {
-    parsed = JSON.parse(jsonStart < 0 ? stdout : stdout.slice(jsonStart));
-  } catch {
-    throw new Error(`openclaw agents list returned unparseable JSON: ${stdout.slice(0, 500)}`);
-  }
-
-  if (!Array.isArray(parsed)) {
-    throw new Error(`openclaw agents list returned unexpected shape (expected array): ${stdout.slice(0, 500)}`);
-  }
-
-  return parsed as OpenclawAgentListEntry[];
+  return parseOpenclawAgentsListOutput(stdout);
 }
 
 export async function openclawAgentsDelete(id: string): Promise<void> {
@@ -233,13 +271,19 @@ const MAX_MESSAGE_BYTES = 256 * 1024;
 export function buildAgentRunArgs(input: {
   agentId: string;
   message: string;
+  sessionKey?: string;
   thinking?: OpenclawThinkingLevel;
   timeoutSeconds: number;
 }) {
-  return [
+  const args = [
     "agent",
     "--agent",
     input.agentId,
+  ];
+  if (input.sessionKey) {
+    args.push("--session-key", input.sessionKey);
+  }
+  args.push(
     "--message",
     input.message,
     "--thinking",
@@ -247,7 +291,8 @@ export function buildAgentRunArgs(input: {
     "--timeout",
     String(input.timeoutSeconds),
     "--json",
-  ];
+  );
+  return args;
 }
 
 /**
@@ -255,13 +300,13 @@ export function buildAgentRunArgs(input: {
  * The Gateway HTTP tools surface deliberately blocks sessions_send and
  * sessions_spawn, so Mission Control must use the agent RPC exposed here.
  *
- * Note: OpenClaw keeps one continuous session per agent. `--session-id` only
- * resumes a session that already exists, so Mission Control cannot pin a fresh
- * session per task; the prompt therefore restates full task context every run.
+ * Mission Control supplies a task-scoped session key so unrelated work never
+ * accumulates in an agent's permanent `main` conversation.
  */
 export async function openclawAgentRun(input: {
   agentId: string;
   message: string;
+  sessionKey?: string;
   thinking?: OpenclawThinkingLevel;
   timeoutSeconds?: number;
 }): Promise<OpenclawAgentRun> {

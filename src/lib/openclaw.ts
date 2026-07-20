@@ -28,7 +28,7 @@ export async function invoke<T = unknown>(
       authorization: `Bearer ${token}`,
       "content-type": "application/json",
     },
-    body: JSON.stringify({ name: tool, args, sessionKey }),
+    body: JSON.stringify({ tool, args, sessionKey }),
   });
 
   if (response.status === 404) {

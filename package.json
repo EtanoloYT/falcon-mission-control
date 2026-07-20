@@ -11,14 +11,16 @@
     "start": "next start -p 3030",
     "lint": "eslint",
     "typecheck": "tsc --noEmit",
-    "test:unit": "NODE_OPTIONS=--conditions=react-server tsx --test tests/openclaw-cli.test.ts",
+    "test:unit": "NODE_OPTIONS=--conditions=react-server tsx --test tests/openclaw-cli.test.ts tests/task-token.test.ts",
     "seed": "NODE_OPTIONS=--conditions=react-server tsx scripts/seed.ts",
-    "import-agents": "NODE_OPTIONS=--conditions=react-server tsx scripts/import-agents.ts"
+    "import-agents": "NODE_OPTIONS=--conditions=react-server tsx scripts/import-agents.ts",
+    "provision": "NODE_OPTIONS=--conditions=react-server tsx scripts/provision.ts"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.3.1",
     "@dnd-kit/sortable": "^10.0.0",
     "@dnd-kit/utilities": "^3.2.2",
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "@types/ws": "^8.18.1",
     "@xyflow/react": "^12.10.2",
     "better-sqlite3": "^12.9.0",

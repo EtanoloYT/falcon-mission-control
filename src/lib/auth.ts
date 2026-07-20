@@ -6,6 +6,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { ZodError } from "zod";
 
 import { getApiKeySecret, getDb, sha256, type AgentRow } from "@/lib/db";
+import { verifyTaskToken } from "@/lib/task-token";
 
 export type Actor =
   | {
@@ -15,6 +16,8 @@ export type Actor =
       kind: "agent";
       id: number;
       name: string;
+      /** Set when the agent authenticated with a per-task token, scoping it to that task. */
+      taskId?: number;
     };
 
 type AllowedActor = Actor["kind"];
@@ -74,10 +77,50 @@ function resolveBearerActor(token: string | undefined | null): Actor | null {
   };
 }
 
+/**
+ * Agents reach Mission Control through one shared MCP server, so they cannot be
+ * told apart by which server they called. Identity rides in this header as a
+ * per-task token minted at dispatch. See lib/task-token.ts for why.
+ */
+export const taskTokenHeader = "x-mc-task-token";
+
+/** Surfaced to the MCP server so a bad token explains itself instead of reading as a flat 401. */
+export const taskTokenErrorHeader = "x-mc-task-token-error";
+
+function resolveTaskTokenActor(token: string | null): { actor: Actor } | { error: string } | null {
+  if (!token) {
+    return null;
+  }
+
+  const verified = verifyTaskToken(token);
+  if (!verified.ok) {
+    return { error: verified.error };
+  }
+
+  const agent = getDb()
+    .prepare("SELECT id, name FROM agents WHERE id = ?")
+    .get(verified.claim.agentId) as AgentRow | undefined;
+
+  if (!agent) {
+    return { error: "The agent this task_token belongs to no longer exists." };
+  }
+
+  return { actor: { kind: "agent", id: agent.id, name: agent.name, taskId: verified.claim.taskId } };
+}
+
 export function resolveActor(request: NextRequest): Actor | null {
   const authorization = request.headers.get("authorization");
   if (authorization?.startsWith("Bearer ")) {
     return resolveBearerActor(authorization.slice(7).trim());
+  }
+
+  const viaTaskToken = resolveTaskTokenActor(request.headers.get(taskTokenHeader));
+  if (viaTaskToken) {
+    // A caller that presented a task token is an agent making a claim about
+    // itself. If that claim is bad, fail it — do not fall through to the
+    // session cookie, or middleware.ts's auto-issued session would silently
+    // upgrade a rejected agent into a full user.
+    return "actor" in viaTaskToken ? viaTaskToken.actor : null;
   }
 
   if (verifySessionToken(request.cookies.get(sessionCookieName)?.value)) {
@@ -96,7 +139,15 @@ export function withAuth<
   return (async (request: NextRequest, routeContext?: unknown) => {
     const actor = resolveActor(request);
     if (!actor) {
-      return NextResponse.json({ ok: false, error: "Unauthorized" }, { status: 401 });
+      // A rejected task token has a specific, actionable reason (expired,
+      // reassigned, malformed). Returning a flat "Unauthorized" would send the
+      // agent into a blind retry loop.
+      const tokenAttempt = request.headers.get(taskTokenHeader)
+        ? resolveTaskTokenActor(request.headers.get(taskTokenHeader))
+        : null;
+      const reason =
+        tokenAttempt && "error" in tokenAttempt ? tokenAttempt.error : "Unauthorized";
+      return NextResponse.json({ ok: false, error: reason }, { status: 401 });
     }
 
     if (!options.allow.includes(actor.kind)) {

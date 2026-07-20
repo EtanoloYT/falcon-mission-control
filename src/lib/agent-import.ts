@@ -87,8 +87,13 @@ function resolveName(entry: OpenclawAgentListEntry, taken: Set<string>) {
  * in place rather than duplicating. Read-only toward OpenClaw itself —
  * never calls openclawAgentsAdd/openclawAgentsDelete.
  */
-export async function importAgentsFromOpenclaw(): Promise<ImportSummary> {
-  const entries = await openclawAgentsList();
+export async function importAgentsFromOpenclaw(options?: {
+  allowedOpenclawIds?: ReadonlySet<string>;
+}): Promise<ImportSummary> {
+  const allEntries = await openclawAgentsList();
+  const entries = options?.allowedOpenclawIds
+    ? allEntries.filter((entry) => options.allowedOpenclawIds?.has(entry.id))
+    : allEntries;
 
   const summary: ImportSummary = { imported: 0, updated: 0, skipped: 0, details: [] };
 

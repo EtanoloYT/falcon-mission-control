@@ -4,6 +4,7 @@ import { getDb, now, type TaskRow } from "@/lib/db";
 import { emitEvent, recordEvent } from "@/lib/events";
 import { openclawAgentRun } from "@/lib/openclaw-cli";
 import type { Agent, Event, Project, Task } from "@/lib/schemas";
+import { issueTaskToken } from "@/lib/task-token";
 import {
   addTaskComment,
   completeTask,
@@ -26,7 +27,8 @@ type DispatchOutcome = {
 };
 
 type DispatcherState = {
-  queue: Promise<void>;
+  /** Serialize work per agent, not globally: one stuck specialist must not stop the whole team. */
+  queues: Map<number, Promise<void>>;
   /** Task ids with a run queued or in flight, so a re-assign does not double-dispatch. */
   inFlightTaskIds: Set<number>;
   wakeAgentIds: Set<number>;
@@ -40,21 +42,31 @@ const globalState = globalThis as typeof globalThis & {
 function dispatcherState() {
   if (!globalState.falconDispatcher) {
     globalState.falconDispatcher = {
-      queue: Promise.resolve(),
+      queues: new Map(),
       inFlightTaskIds: new Set<number>(),
       wakeAgentIds: new Set<number>(),
       recoveryStarted: false,
     };
   }
 
+  // Survive Next.js hot reloads from the older single-queue state shape.
+  if (!globalState.falconDispatcher.queues) {
+    globalState.falconDispatcher.queues = new Map();
+  }
+
   return globalState.falconDispatcher;
 }
 
-function enqueue(job: () => Promise<void>) {
+function enqueue(agentId: number, job: () => Promise<void>) {
   const state = dispatcherState();
-  const next = state.queue.catch(() => undefined).then(job);
-  state.queue = next.catch((error) => {
+  const current = state.queues.get(agentId) ?? Promise.resolve();
+  const next = current.catch(() => undefined).then(job);
+  const tracked = next.catch((error) => {
     console.error("[falcon-mission-control] OpenClaw dispatch job failed", error);
+  });
+  state.queues.set(agentId, tracked);
+  void tracked.finally(() => {
+    if (state.queues.get(agentId) === tracked) state.queues.delete(agentId);
   });
   return next;
 }
@@ -69,9 +81,17 @@ function openclawIdForAgent(agent: Agent) {
 }
 
 function taskTimeoutSeconds() {
-  const configured = Number(process.env.OPENCLAW_TASK_TIMEOUT_SECONDS ?? 900);
-  if (!Number.isFinite(configured)) return 900;
+  const configured = Number(process.env.OPENCLAW_TASK_TIMEOUT_SECONDS ?? 300);
+  if (!Number.isFinite(configured)) return 300;
   return Math.max(60, Math.min(3600, Math.round(configured)));
+}
+
+const MAX_PROMPT_FIELD_CHARS = 6_000;
+
+function boundedPromptField(value: string | null | undefined, fallback = "(none)") {
+  const text = value?.trim() || fallback;
+  if (text.length <= MAX_PROMPT_FIELD_CHARS) return text;
+  return `${text.slice(0, MAX_PROMPT_FIELD_CHARS)}\n[truncated by Mission Control]`;
 }
 
 export function buildTaskPrompt(input: {
@@ -79,6 +99,8 @@ export function buildTaskPrompt(input: {
   project: Project;
   agent: Agent;
   roster: Agent[];
+  /** Per-task capability token; the agent's only proof of identity to the shared MCP server. */
+  workToken: string;
 }) {
   const roster = input.roster
     .map((entry) => `- ID ${entry.id}: ${entry.name} (${entry.role}, OpenClaw ${openclawIdForAgent(entry) ?? "not linked"})`)
@@ -88,31 +110,50 @@ export function buildTaskPrompt(input: {
     "",
     `Mission Control task: #${input.task.id}`,
     `Project: ${input.project.name}`,
-    `Project description: ${input.project.description || "(none)"}`,
+    `Project description: ${boundedPromptField(input.project.description)}`,
     `Assigned agent: ${input.agent.name} (${input.agent.role})`,
     input.project.target_folder === "AUTO"
       ? "Working directory: AUTO — no directory restriction."
       : `Working directory: ${input.project.target_folder}\n- Create and modify files only under this directory, using absolute paths.`,
     `Priority: ${input.task.priority}`,
-    `Title: ${input.task.title}`,
-    `Description: ${input.task.description || "(none)"}`,
+    `Title: ${boundedPromptField(input.task.title)}`,
+    `Description: ${boundedPromptField(input.task.description)}`,
     "",
     "Execution contract:",
     "- Work on the task now using your available tools; do not stop after merely proposing a plan.",
     "- Respect paths, constraints, and acceptance criteria in the project/task description.",
     "- Delegate only when that materially improves the result and the delegated agent has the needed tools.",
-    "- Mission Control tracks this run's final response automatically.",
+    "- Report progress on longer work with falconmc__mc_comment_task.",
     "- Finish with a concise report of what changed, verification performed, and any remaining blocker.",
+    ...(input.agent.role === "coder"
+      ? [
+          "- CODER RULE: Make no more than 3 read/exec inspection calls before your first write or edit call.",
+          "- Missing implementation files are expected: create them immediately instead of repeatedly searching for them.",
+          "- Do not delegate, redesign the plan, or keep grepping once the required missing file is known.",
+        ]
+      : []),
     "",
-    "Mission Control delegation:",
-    "- You cannot call Mission Control directly. Mission Control will materialize subtasks from your final response.",
-    "- If this task asks you to create, assign, or delegate work, a prose plan alone is not completion.",
+    "Mission Control tools:",
+    "- You have falconmc__mc_* tools that talk to Mission Control directly. Use their exact names and prefer them over describing what you would do.",
+    `- Every falconmc__mc_* tool needs work_token. Yours is: ${input.workToken}`,
+    "- Pass that work_token string exactly as-is. It identifies you and your task, so no tool needs your agent id or task id.",
+    "- falconmc__mc_list_agents gives you real integer agent ids for delegation.",
+    "- Delegated subtasks run after your turn ends. Do not wait for their results.",
     `- Available agents:\n${roster}`,
+    "",
+    "If this task asks you to create, assign, plan or delegate work:",
+    "- A prose plan alone is not completion. The work only counts once falconmc__mc_delegate has been called.",
+    "- Call falconmc__mc_delegate once per subtask, back to back, before you write any prose.",
+    "- Cover the whole job: keep calling falconmc__mc_delegate until every part of it is assigned to someone.",
+    "- Do not stop after the first subtask. One falconmc__mc_delegate call is almost never a complete plan.",
+    "- Give each subtask a description someone could act on without seeing this task.",
+    "- Only after the last falconmc__mc_delegate call, write a short report listing what you delegated and to whom.",
+    "",
+    "Fallback (only if your falconmc__mc_delegate calls fail):",
     "- End your final response with exactly one <mission_control_subtasks> block containing a JSON array.",
     '- Every array item must be: {"title":"...","description":"...","priority":"low|normal|high|urgent","assigned_agent_id":NUMBER}.',
     "- Use only agent IDs from the roster. Do not include project_id or parent_task_id; Mission Control supplies them safely.",
-    "- Example: <mission_control_subtasks>[{\"title\":\"Implement API\",\"description\":\"Build and verify the API.\",\"priority\":\"high\",\"assigned_agent_id\":3}]</mission_control_subtasks>",
-    "- If no subtasks are needed, omit the block. Mission Control automatically queues every valid item.",
+    "- Mission Control ignores duplicates, so a subtask you already created with falconmc__mc_delegate will not be created twice.",
   ].join("\n");
 }
 
@@ -123,9 +164,51 @@ export type ProposedSubtask = {
   assigned_agent_id: number;
 };
 
-export function parseProposedSubtasks(text: string) {
+function decodeJsonString(value: string) {
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return typeof parsed === "string" ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Some small local models choose the correct tool and arguments but flatten
+ * the call into text. Recover only the strict, task-token-anchored shape so
+ * arbitrary prose can never create work accidentally.
+ */
+export function parseFlattenedDelegations(text: string, workToken: string) {
+  const escapedToken = workToken.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const jsonString = '"(?:[^"\\\\]|\\\\.)*"';
+  const pattern = new RegExp(
+    `${escapedToken}\\s+(\\d+)\\s+(${jsonString})\\s+(${jsonString})\\s+(low|normal|high|urgent)\\b`,
+    "gi"
+  );
+  const seen = new Set<string>();
+  const subtasks: ProposedSubtask[] = [];
+  for (const match of text.matchAll(pattern)) {
+    const assignedAgentId = Number(match[1]);
+    const title = decodeJsonString(match[2])?.trim().slice(0, 300) ?? "";
+    const description = decodeJsonString(match[3])?.slice(0, 30_000) ?? "";
+    const priority = match[4].toLowerCase() as Task["priority"];
+    const key = `${assignedAgentId}:${title.toLowerCase()}`;
+    if (!Number.isSafeInteger(assignedAgentId) || assignedAgentId <= 0 || !title || seen.has(key)) continue;
+    seen.add(key);
+    subtasks.push({ title, description, priority, assigned_agent_id: assignedAgentId });
+    if (subtasks.length === 20) break;
+  }
+  return subtasks;
+}
+
+export function parseProposedSubtasks(text: string, workToken?: string) {
   const match = text.match(/<mission_control_subtasks>\s*([\s\S]*?)\s*<\/mission_control_subtasks>/i);
-  if (!match) return { cleanText: text.trim(), subtasks: [] as ProposedSubtask[] };
+  if (!match) {
+    return {
+      cleanText: text.trim(),
+      subtasks: workToken ? parseFlattenedDelegations(text, workToken) : [],
+    };
+  }
 
   const cleanText = text.replace(match[0], "").trim();
   let raw: unknown;
@@ -261,21 +344,38 @@ async function executeTask(taskId: number, agentId: number, openclawId: string) 
   if (!task || !agent || !project) {
     throw new Error("Task, agent, or project disappeared before dispatch");
   }
+  // A user can cancel a task while it waits behind another agent in the
+  // serialized queue. Re-read state at execution time and honor terminal
+  // status instead of resurrecting cancelled/finished work.
+  if (["done", "review", "failed"].includes(task.status)) {
+    return;
+  }
 
   markRunStarted(taskId, agentId);
   try {
+    const workToken = issueTaskToken({ taskId: task.id, agentId: agent.id });
+    // Every attempt gets a fresh transcript. A timed-out embedded run may stay
+    // active briefly inside OpenClaw; unique keys let recovery proceed without
+    // racing or mutating that predecessor.
+    const sessionKey = `agent:${openclawId}:mc-task-${task.id}-${Date.now()}`;
     const run = await openclawAgentRun({
       agentId: openclawId,
+      sessionKey,
       message: buildTaskPrompt({
         task,
         project,
         agent,
         roster: listAgentsFlat(),
+        workToken,
       }),
-      thinking: "low",
+      // Local reasoning models can spend minutes thinking before their first
+      // tool call. The dispatch prompt already supplies a strict execution
+      // contract, so minimal reasoning is the better reliability/latency
+      // tradeoff here.
+        thinking: "off",
       timeoutSeconds: taskTimeoutSeconds(),
     });
-    const proposal = parseProposedSubtasks(run.text);
+    const proposal = parseProposedSubtasks(run.text, workToken);
     const materialized = materializeSubtasks(task, proposal.subtasks);
     const result = materialized.total
       ? `${proposal.cleanText}\n\nMission Control materialized ${materialized.total} subtask(s) (${materialized.created} new) and queued their assignees.`
@@ -291,7 +391,7 @@ export function enqueueTaskDispatch(input: { taskId: number; agentId?: number | 
   if (!task) {
     return { queued: false, reason: "Task not found" };
   }
-  if (["done", "review"].includes(task.status)) {
+  if (["done", "review", "failed"].includes(task.status)) {
     return { queued: false, reason: `Task is already ${task.status}` };
   }
 
@@ -312,7 +412,7 @@ export function enqueueTaskDispatch(input: { taskId: number; agentId?: number | 
 
   markTaskQueued(task, agent.id);
   state.inFlightTaskIds.add(task.id);
-  void enqueue(() => executeTask(task.id, agent.id, openclawId))
+  void enqueue(agent.id, () => executeTask(task.id, agent.id, openclawId))
     .finally(() => {
       state.inFlightTaskIds.delete(task.id);
     })
@@ -358,11 +458,12 @@ export function enqueueAgentWake(agentId: number): DispatchOutcome {
   }
 
   state.wakeAgentIds.add(agentId);
-  void enqueue(async () => {
+  void enqueue(agentId, async () => {
     markAgentActivity(agentId, "busy");
     try {
       await openclawAgentRun({
         agentId: openclawId,
+        sessionKey: `agent:${openclawId}:mc-wake`,
         message:
           "Falcon Mission Control has manually woken you. Confirm readiness in one short sentence and report only a real blocker, if one exists. Do not perform unrelated work.",
         thinking: "off",

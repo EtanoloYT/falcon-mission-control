@@ -1,12 +1,17 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { buildAgentRunArgs, parseOpenclawAgentOutput } from "../src/lib/openclaw-cli";
-import { parseProposedSubtasks } from "../src/lib/dispatch";
+import {
+  buildAgentRunArgs,
+  parseOpenclawAgentOutput,
+  parseOpenclawAgentsListOutput,
+} from "../src/lib/openclaw-cli";
+import { parseFlattenedDelegations, parseProposedSubtasks } from "../src/lib/dispatch";
 
 test("builds agent run args the installed OpenClaw CLI actually accepts", () => {
   const args = buildAgentRunArgs({
     agentId: "falcon-hawk",
+    sessionKey: "agent:falcon-hawk:mc-task-42",
     message: "do the thing",
     thinking: "low",
     timeoutSeconds: 900,
@@ -16,6 +21,8 @@ test("builds agent run args the installed OpenClaw CLI actually accepts", () => 
     "agent",
     "--agent",
     "falcon-hawk",
+    "--session-key",
+    "agent:falcon-hawk:mc-task-42",
     "--message",
     "do the thing",
     "--thinking",
@@ -25,9 +32,9 @@ test("builds agent run args the installed OpenClaw CLI actually accepts", () => 
     "--json",
   ]);
 
-  // Regression: these flags do not exist in OpenClaw 2026.4.15. Passing them
-  // made every dispatch exit non-zero and mark the task failed.
-  assert.ok(!args.includes("--session-key"));
+  // OpenClaw 2026.7 supports explicit session keys. Every Mission Control task
+  // uses one so unrelated task history cannot overflow the model context.
+  assert.ok(args.includes("--session-key"));
   assert.ok(!args.includes("--message-file"));
 });
 
@@ -75,6 +82,16 @@ test("rejects unsuccessful OpenClaw runs", () => {
   );
 });
 
+test("parses an agent list after bracketed OpenClaw diagnostics", () => {
+  const output = [
+    "[agents/auth-profiles] synced openai-codex credentials from external cli",
+    JSON.stringify([{ id: "mc-eagle", name: "Eagle" }], null, 2),
+    "[agents/auth-profiles] another harmless diagnostic",
+  ].join("\n");
+
+  assert.deepEqual(parseOpenclawAgentsListOutput(output), [{ id: "mc-eagle", name: "Eagle" }]);
+});
+
 test("extracts validated Mission Control subtasks and removes the control block", () => {
   const parsed = parseProposedSubtasks(`Work breakdown ready.\n<mission_control_subtasks>
 [{"title":"Implement API","description":"Build it","priority":"high","assigned_agent_id":3}]
@@ -92,4 +109,42 @@ test("drops invalid Mission Control subtask entries", () => {
   );
 
   assert.deepEqual(parsed.subtasks, []);
+});
+
+test("recovers and deduplicates flattened local-model delegation calls", () => {
+  const token = "mct_49.7.123.signature";
+  const flattened = [
+    `falconmc__${token}`,
+    "8",
+    '"Build the notes app"',
+    '"Implement CRUD behavior."',
+    "high",
+    `falconmc__${token}`,
+    "11",
+    '"Review the notes app"',
+    '"Test the finished behavior."',
+    "normal",
+    // Models sometimes repeat their attempted call transcript verbatim.
+    `falconmc__${token}`,
+    "8",
+    '"Build the notes app"',
+    '"Implement CRUD behavior."',
+    "high",
+  ].join("\n");
+
+  assert.deepEqual(parseFlattenedDelegations(flattened, token), [
+    {
+      title: "Build the notes app",
+      description: "Implement CRUD behavior.",
+      priority: "high",
+      assigned_agent_id: 8,
+    },
+    {
+      title: "Review the notes app",
+      description: "Test the finished behavior.",
+      priority: "normal",
+      assigned_agent_id: 11,
+    },
+  ]);
+  assert.deepEqual(parseFlattenedDelegations(flattened, "mct_wrong_task.7.123.signature"), []);
 });
