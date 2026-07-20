@@ -1,8 +1,35 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { parseOpenclawAgentOutput } from "../src/lib/openclaw-cli";
+import { buildAgentRunArgs, parseOpenclawAgentOutput } from "../src/lib/openclaw-cli";
 import { parseProposedSubtasks } from "../src/lib/dispatch";
+
+test("builds agent run args the installed OpenClaw CLI actually accepts", () => {
+  const args = buildAgentRunArgs({
+    agentId: "falcon-hawk",
+    message: "do the thing",
+    thinking: "low",
+    timeoutSeconds: 900,
+  });
+
+  assert.deepEqual(args, [
+    "agent",
+    "--agent",
+    "falcon-hawk",
+    "--message",
+    "do the thing",
+    "--thinking",
+    "low",
+    "--timeout",
+    "900",
+    "--json",
+  ]);
+
+  // Regression: these flags do not exist in OpenClaw 2026.4.15. Passing them
+  // made every dispatch exit non-zero and mark the task failed.
+  assert.ok(!args.includes("--session-key"));
+  assert.ok(!args.includes("--message-file"));
+});
 
 test("parses the visible payload from a successful OpenClaw agent run", () => {
   const result = parseOpenclawAgentOutput(
@@ -30,10 +57,11 @@ test("parses the visible payload from a successful OpenClaw agent run", () => {
 });
 
 test("uses final assistant text when payloads are absent", () => {
+  // OpenClaw nests finalAssistant* under result.meta, not result.
   const result = parseOpenclawAgentOutput(
     `OpenClaw diagnostic line\n${JSON.stringify({
       status: "ok",
-      result: { finalAssistantVisibleText: "Ready" },
+      result: { meta: { finalAssistantVisibleText: "Ready" } },
     })}`
   );
 

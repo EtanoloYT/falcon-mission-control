@@ -1,7 +1,5 @@
 import "server-only";
 
-import crypto from "node:crypto";
-
 import { getDb, now, type TaskRow } from "@/lib/db";
 import { emitEvent, recordEvent } from "@/lib/events";
 import { openclawAgentRun } from "@/lib/openclaw-cli";
@@ -24,13 +22,13 @@ type DispatchOutcome = {
   alreadyQueued?: boolean;
   agentId?: number;
   openclawId?: string;
-  sessionKey?: string;
   reason?: string;
 };
 
 type DispatcherState = {
   queue: Promise<void>;
-  taskSessions: Map<number, string>;
+  /** Task ids with a run queued or in flight, so a re-assign does not double-dispatch. */
+  inFlightTaskIds: Set<number>;
   wakeAgentIds: Set<number>;
   recoveryStarted: boolean;
 };
@@ -43,7 +41,7 @@ function dispatcherState() {
   if (!globalState.falconDispatcher) {
     globalState.falconDispatcher = {
       queue: Promise.resolve(),
-      taskSessions: new Map<number, string>(),
+      inFlightTaskIds: new Set<number>(),
       wakeAgentIds: new Set<number>(),
       recoveryStarted: false,
     };
@@ -157,12 +155,15 @@ function materializeSubtasks(parent: Task, proposals: ProposedSubtask[]) {
   const { taskIds, events } = getDb().transaction(() => {
     const ids: number[] = [];
     const createdEvents: Event[] = [];
+    let duplicates = 0;
     for (const proposal of valid) {
       const duplicate = getDb()
         .prepare("SELECT id FROM tasks WHERE parent_task_id = ? AND lower(title) = lower(?) LIMIT 1")
         .get(parent.id, proposal.title) as { id: number } | undefined;
       if (duplicate) {
-        ids.push(duplicate.id);
+        // Already materialized by an earlier run — do not re-dispatch it, or a
+        // re-run of the parent restarts children that are running or finished.
+        duplicates += 1;
         continue;
       }
 
@@ -179,12 +180,12 @@ function materializeSubtasks(parent: Task, proposals: ProposedSubtask[]) {
       ids.push(task.id);
       createdEvents.push(recordEvent({ kind: "task.created", payload: { task } }, false));
     }
-    return { taskIds: ids, events: createdEvents };
+    return { taskIds: ids, events: createdEvents, duplicates };
   })();
 
   emitAll(events);
   taskIds.forEach((taskId) => enqueueTaskDispatch({ taskId }));
-  return { total: taskIds.length, created: events.length };
+  return { total: taskIds.length, created: taskIds.length };
 }
 
 function markTaskQueued(task: Task, agentId: number) {
@@ -250,7 +251,7 @@ function markRunFailed(taskId: number, agentId: number, error: unknown) {
   emitAll(events);
 }
 
-async function executeTask(taskId: number, agentId: number, openclawId: string, sessionKey: string) {
+async function executeTask(taskId: number, agentId: number, openclawId: string) {
   const task = getTask(taskId);
   const agent = getAgent(agentId);
   const project = task ? getProject(task.project_id) : null;
@@ -262,7 +263,6 @@ async function executeTask(taskId: number, agentId: number, openclawId: string, 
   try {
     const run = await openclawAgentRun({
       agentId: openclawId,
-      sessionKey,
       message: buildTaskPrompt({
         task,
         project,
@@ -303,21 +303,19 @@ export function enqueueTaskDispatch(input: { taskId: number; agentId?: number | 
   }
 
   const state = dispatcherState();
-  const activeSessionKey = state.taskSessions.get(task.id);
-  if (activeSessionKey) {
-    return { queued: true, alreadyQueued: true, agentId: agent.id, openclawId, sessionKey: activeSessionKey };
+  if (state.inFlightTaskIds.has(task.id)) {
+    return { queued: true, alreadyQueued: true, agentId: agent.id, openclawId };
   }
-  const sessionKey = `agent:${openclawId}:mission-control-task-${task.id}-${crypto.randomUUID()}`;
 
   markTaskQueued(task, agent.id);
-  state.taskSessions.set(task.id, sessionKey);
-  void enqueue(() => executeTask(task.id, agent.id, openclawId, sessionKey))
+  state.inFlightTaskIds.add(task.id);
+  void enqueue(() => executeTask(task.id, agent.id, openclawId))
     .finally(() => {
-      state.taskSessions.delete(task.id);
+      state.inFlightTaskIds.delete(task.id);
     })
     .catch(() => undefined);
 
-  return { queued: true, agentId: agent.id, openclawId, sessionKey };
+  return { queued: true, agentId: agent.id, openclawId };
 }
 
 function markAgentActivity(agentId: number, status: Agent["status"]) {
@@ -362,7 +360,6 @@ export function enqueueAgentWake(agentId: number): DispatchOutcome {
     try {
       await openclawAgentRun({
         agentId: openclawId,
-        sessionKey: `agent:${openclawId}:mission-control-wake`,
         message:
           "Falcon Mission Control has manually woken you. Confirm readiness in one short sentence and report only a real blocker, if one exists. Do not perform unrelated work.",
         thinking: "off",
@@ -379,7 +376,7 @@ export function enqueueAgentWake(agentId: number): DispatchOutcome {
     })
     .catch(() => undefined);
 
-  return { queued: true, agentId, openclawId, sessionKey: `agent:${openclawId}:mission-control-wake` };
+  return { queued: true, agentId, openclawId };
 }
 
 /** Re-queues durable assigned work once after a Mission Control process restart. */

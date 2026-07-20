@@ -143,8 +143,6 @@ export function createAgent(input: {
     throw new Error("Failed to create agent");
   }
 
-  db.prepare("UPDATE agents SET api_key = ? WHERE id = ?").run(apiKey ? require("@/lib/db").sha256(apiKey) : "", inserted.id);
-
   const created = getAgent(inserted.id);
   if (!created) {
     throw new Error("Failed to hydrate agent");
@@ -491,6 +489,17 @@ export function getAgentApiKey(id: number) {
   return row?.api_key ?? null;
 }
 
+/** Stores the hash — auth compares sha256(token), so never persist the raw key. */
 export function setAgentApiKey(id: number, apiKey: string) {
-  getDb().prepare("UPDATE agents SET api_key = ? WHERE id = ?").run(apiKey, id);
+  getDb().prepare("UPDATE agents SET api_key = ? WHERE id = ?").run(sha256(apiKey), id);
+}
+
+/**
+ * Issues a fresh raw key for an existing agent and stores only its hash.
+ * The raw value is returned once and cannot be recovered afterwards.
+ */
+export function rotateAgentKey(id: number) {
+  const apiKey = generateApiKey();
+  const result = getDb().prepare("UPDATE agents SET api_key = ? WHERE id = ?").run(sha256(apiKey), id);
+  return result.changes > 0 ? apiKey : null;
 }

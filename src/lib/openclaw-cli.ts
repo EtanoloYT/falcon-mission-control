@@ -71,8 +71,11 @@ function run(
 
 type AddResult = { agentId: string; name: string; workspace: string; agentDir: string };
 
-export async function openclawAgentsAdd(name: string, opts?: { model?: string }): Promise<AddResult> {
-  const id = slugifyAgentId(name);
+export async function openclawAgentsAdd(
+  name: string,
+  opts?: { model?: string; id?: string }
+): Promise<AddResult> {
+  const id = opts?.id ?? slugifyAgentId(name);
   const workspace = path.join(os.homedir(), ".openclaw", "workspaces", id);
   const args = ["agents", "add", id, "--non-interactive", "--workspace", workspace, "--json"];
   if (opts?.model) args.push("--model", opts.model);
@@ -123,9 +126,12 @@ export async function openclawAgentsList(): Promise<OpenclawAgentListEntry[]> {
     throw new Error(`openclaw agents list failed (exit ${code}): ${stderr || stdout || "no output"}`);
   }
 
+  // The CLI can prefix a banner line, so start at the first JSON token rather
+  // than parsing the whole stream (matches openclawAgentsAdd).
   let parsed: unknown;
+  const jsonStart = stdout.indexOf("[");
   try {
-    parsed = JSON.parse(stdout);
+    parsed = JSON.parse(jsonStart < 0 ? stdout : stdout.slice(jsonStart));
   } catch {
     throw new Error(`openclaw agents list returned unparseable JSON: ${stdout.slice(0, 500)}`);
   }
@@ -156,10 +162,11 @@ type OpenclawAgentJson = {
   error?: string;
   result?: {
     payloads?: OpenclawAgentPayload[];
-    finalAssistantVisibleText?: string;
-    finalAssistantRawText?: string;
     meta?: {
       durationMs?: number;
+      /** OpenClaw nests these under `meta`, not directly on `result`. */
+      finalAssistantVisibleText?: string;
+      finalAssistantRawText?: string;
       agentMeta?: {
         sessionId?: string;
         provider?: string;
@@ -168,6 +175,8 @@ type OpenclawAgentJson = {
     };
   };
 };
+
+export type OpenclawThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
 
 export type OpenclawAgentRun = {
   runId: string | null;
@@ -203,8 +212,8 @@ export function parseOpenclawAgentOutput(stdout: string): OpenclawAgentRun {
     .join("\n\n");
   const text =
     payloadText ||
-    parsed.result?.finalAssistantVisibleText?.trim() ||
-    parsed.result?.finalAssistantRawText?.trim() ||
+    parsed.result?.meta?.finalAssistantVisibleText?.trim() ||
+    parsed.result?.meta?.finalAssistantRawText?.trim() ||
     "OpenClaw completed the task without a text response.";
   const agentMeta = parsed.result?.meta?.agentMeta;
 
@@ -218,45 +227,54 @@ export function parseOpenclawAgentOutput(stdout: string): OpenclawAgentRun {
   };
 }
 
+/** `openclaw agent` takes the prompt on argv; stay well clear of ARG_MAX. */
+const MAX_MESSAGE_BYTES = 256 * 1024;
+
+export function buildAgentRunArgs(input: {
+  agentId: string;
+  message: string;
+  thinking?: OpenclawThinkingLevel;
+  timeoutSeconds: number;
+}) {
+  return [
+    "agent",
+    "--agent",
+    input.agentId,
+    "--message",
+    input.message,
+    "--thinking",
+    input.thinking ?? "low",
+    "--timeout",
+    String(input.timeoutSeconds),
+    "--json",
+  ];
+}
+
 /**
  * Run a real agent turn through the supported OpenClaw CLI/Gateway path.
  * The Gateway HTTP tools surface deliberately blocks sessions_send and
  * sessions_spawn, so Mission Control must use the agent RPC exposed here.
+ *
+ * Note: OpenClaw keeps one continuous session per agent. `--session-id` only
+ * resumes a session that already exists, so Mission Control cannot pin a fresh
+ * session per task; the prompt therefore restates full task context every run.
  */
 export async function openclawAgentRun(input: {
   agentId: string;
-  sessionKey: string;
   message: string;
-  thinking?: "off" | "minimal" | "low" | "medium" | "high";
+  thinking?: OpenclawThinkingLevel;
   timeoutSeconds?: number;
 }): Promise<OpenclawAgentRun> {
   const timeoutSeconds = input.timeoutSeconds ?? 900;
-  const messageDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "falcon-openclaw-"));
-  const messagePath = path.join(messageDirectory, "message.txt");
-  fs.writeFileSync(messagePath, input.message, { encoding: "utf8", mode: 0o600 });
-  const args = [
-    "agent",
-    "--agent",
-    input.agentId,
-    "--session-key",
-    input.sessionKey,
-    "--message-file",
-    messagePath,
-    "--thinking",
-    input.thinking ?? "low",
-    "--timeout",
-    String(timeoutSeconds),
-    "--json",
-  ];
-  let result: Awaited<ReturnType<typeof run>>;
-  try {
-    result = await run(args, {
-      timeoutMs: (timeoutSeconds + 30) * 1000,
-    });
-  } finally {
-    fs.rmSync(messageDirectory, { recursive: true, force: true });
+  const messageBytes = Buffer.byteLength(input.message);
+  if (messageBytes > MAX_MESSAGE_BYTES) {
+    throw new Error(`OpenClaw agent prompt is too large (${messageBytes} bytes, limit ${MAX_MESSAGE_BYTES})`);
   }
-  const { code, stdout, stderr, timedOut } = result;
+
+  const args = buildAgentRunArgs({ ...input, timeoutSeconds });
+  const { code, stdout, stderr, timedOut } = await run(args, {
+    timeoutMs: (timeoutSeconds + 30) * 1000,
+  });
 
   if (timedOut) {
     throw new Error(`OpenClaw agent timed out after ${timeoutSeconds} seconds`);
