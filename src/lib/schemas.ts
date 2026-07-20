@@ -44,6 +44,7 @@ export const projectBaseSchema = z.object({
   name: z.string(),
   description: z.string(),
   status: projectStatusSchema,
+  target_folder: z.string(),
   created_at: z.number(),
   updated_at: z.number(),
 });
@@ -122,9 +123,30 @@ export const healthSchema = z.object({
   }),
 });
 
+export const AUTO_TARGET_FOLDER = "AUTO";
+
+/**
+ * Either the literal "AUTO" (agents work anywhere the user can) or an absolute,
+ * normalized path. Relative paths and ".." segments are rejected so a target
+ * folder cannot be used to walk out of the directory it names.
+ */
+export const targetFolderSchema = z
+  .string()
+  .trim()
+  .default(AUTO_TARGET_FOLDER)
+  .transform((value) => (value === "" ? AUTO_TARGET_FOLDER : value))
+  .transform((value) => (value.toUpperCase() === AUTO_TARGET_FOLDER ? AUTO_TARGET_FOLDER : value))
+  .refine(
+    (value) =>
+      value === AUTO_TARGET_FOLDER ||
+      (value.startsWith("/") && !value.split("/").includes("..")),
+    { message: 'target_folder must be "AUTO" or an absolute path without ".." segments' }
+  );
+
 export const projectCreateSchema = z.object({
   name: z.string().min(1),
   description: z.string().default(""),
+  target_folder: targetFolderSchema,
 });
 
 export const projectPatchSchema = projectCreateSchema.partial().extend({

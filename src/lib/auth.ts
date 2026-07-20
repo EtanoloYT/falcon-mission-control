@@ -3,6 +3,7 @@ import "server-only";
 import crypto from "node:crypto";
 
 import { NextRequest, NextResponse } from "next/server";
+import { ZodError } from "zod";
 
 import { getApiKeySecret, getDb, sha256, type AgentRow } from "@/lib/db";
 
@@ -105,7 +106,19 @@ export function withAuth<
     const requestWithContext = request as NextRequest & { ctx?: AuthContext };
     requestWithContext.ctx = { actor };
 
-    return handler(requestWithContext, { actor }, (routeContext ?? {}) as TContext);
+    try {
+      return await handler(requestWithContext, { actor }, (routeContext ?? {}) as TContext);
+    } catch (error) {
+      // Schema failures are the caller's fault, not a server fault. Agents call
+      // these routes through MCP tools and need a readable reason, not a 500.
+      if (error instanceof ZodError) {
+        const detail = error.issues
+          .map((issue) => `${issue.path.join(".") || "body"}: ${issue.message}`)
+          .join("; ");
+        return NextResponse.json({ ok: false, error: `Invalid request — ${detail}` }, { status: 400 });
+      }
+      throw error;
+    }
   }) as unknown as (request: NextRequest, routeContext?: unknown) => Promise<Response>;
 }
 

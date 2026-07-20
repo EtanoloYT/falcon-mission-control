@@ -15,6 +15,7 @@ export default function ProjectsPage() {
   const [showCreate, setShowCreate] = useState(false);
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
+  const [targetFolder, setTargetFolder] = useState("AUTO");
   const [deleteTarget, setDeleteTarget] = useState<Project | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
@@ -50,9 +51,10 @@ export default function ProjectsPage() {
   }, [projects, tasks]);
 
   const createProject = async () => {
-    await apiPost("/api/projects", { name, description });
+    await apiPost("/api/projects", { name, description, target_folder: targetFolder });
     setName("");
     setDescription("");
+    setTargetFolder("AUTO");
     setShowCreate(false);
     await load();
   };
@@ -157,6 +159,19 @@ export default function ProjectsPage() {
           <div className="space-y-2">
             <Label>Name</Label>
             <Input value={name} onChange={(event) => setName(event.target.value)} placeholder="Launch Falcon UI" />
+          </div>
+          <div className="space-y-2">
+            <Label>Target folder</Label>
+            <Input
+              value={targetFolder}
+              onChange={(event) => setTargetFolder(event.target.value)}
+              className="font-mono"
+              placeholder="AUTO"
+            />
+            <p className="text-xs text-zinc-500">
+              Absolute path the agents should work in. <span className="font-mono">AUTO</span> places no restriction —
+              agents may read and write anywhere your user account can.
+            </p>
           </div>
           <div className="space-y-2">
             <Label>Description</Label>

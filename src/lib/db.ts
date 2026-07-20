@@ -32,6 +32,8 @@ export interface ProjectRow {
   name: string;
   description: string;
   status: ProjectStatus;
+  /** Absolute path the agents should work in, or "AUTO" for no restriction. */
+  target_folder: string;
   created_at: number;
   updated_at: number;
 }
@@ -91,6 +93,7 @@ CREATE TABLE IF NOT EXISTS projects (
   name TEXT NOT NULL UNIQUE,
   description TEXT NOT NULL DEFAULT '',
   status TEXT NOT NULL DEFAULT 'active',
+  target_folder TEXT NOT NULL DEFAULT 'AUTO',
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 );
@@ -163,6 +166,7 @@ function openDatabase() {
   db.pragma("synchronous = NORMAL");
   db.exec(schemaSql);
   ensureColumn(db, "agents", "api_key", "TEXT");
+  ensureColumn(db, "projects", "target_folder", "TEXT NOT NULL DEFAULT 'AUTO'");
   return db;
 }
 

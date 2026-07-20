@@ -90,6 +90,9 @@ export function buildTaskPrompt(input: {
     `Project: ${input.project.name}`,
     `Project description: ${input.project.description || "(none)"}`,
     `Assigned agent: ${input.agent.name} (${input.agent.role})`,
+    input.project.target_folder === "AUTO"
+      ? "Working directory: AUTO — no directory restriction."
+      : `Working directory: ${input.project.target_folder}\n- Create and modify files only under this directory, using absolute paths.`,
     `Priority: ${input.task.priority}`,
     `Title: ${input.task.title}`,
     `Description: ${input.task.description || "(none)"}`,

@@ -55,17 +55,22 @@ export function getProject(id: number) {
   return row ? mapProject(row) : null;
 }
 
-export function createProject(input: { name: string; description: string }) {
+export function createProject(input: { name: string; description: string; target_folder?: string }) {
   const db = getDb();
   const timestamp = now();
   const result = db
-    .prepare("INSERT INTO projects (name, description, status, created_at, updated_at) VALUES (?, ?, 'active', ?, ?)")
-    .run(input.name, input.description, timestamp, timestamp);
+    .prepare(
+      "INSERT INTO projects (name, description, status, target_folder, created_at, updated_at) VALUES (?, ?, 'active', ?, ?, ?)"
+    )
+    .run(input.name, input.description, input.target_folder ?? "AUTO", timestamp, timestamp);
   const project = getProject(Number(result.lastInsertRowid));
   return project;
 }
 
-export function updateProject(id: number, input: Partial<Pick<Project, "name" | "description" | "status">>) {
+export function updateProject(
+  id: number,
+  input: Partial<Pick<Project, "name" | "description" | "status" | "target_folder">>
+) {
   const db = getDb();
   const existing = getProject(id);
   if (!existing) {
@@ -76,12 +81,16 @@ export function updateProject(id: number, input: Partial<Pick<Project, "name" | 
     name: input.name ?? existing.name,
     description: input.description ?? existing.description,
     status: input.status ?? existing.status,
+    target_folder: input.target_folder ?? existing.target_folder,
   };
 
-  db.prepare("UPDATE projects SET name = ?, description = ?, status = ?, updated_at = ? WHERE id = ?").run(
+  db.prepare(
+    "UPDATE projects SET name = ?, description = ?, status = ?, target_folder = ?, updated_at = ? WHERE id = ?"
+  ).run(
     next.name,
     next.description,
     next.status,
+    next.target_folder,
     now(),
     id
   );
